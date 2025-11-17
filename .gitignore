@@ -1,0 +1,13 @@
+.env
+.env.*
+secrets/
+*.log
+*.key
+*.pem
+node_modules/
+.next/
+out/
+.vscode/
+.idea/
+.vagrant/
+*~

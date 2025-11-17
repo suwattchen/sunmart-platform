@@ -1,0 +1,158 @@
+services:
+  nats:
+    image: nats:2.10-alpine
+    command: ["--jetstream", "--store_dir", "/data", "--http_port", "8222"]
+    volumes:
+      - nats_data:/data
+    networks:
+      - sunmart-net
+    restart: unless-stopped
+    ports:
+      - "4222:4222"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8222/varz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: sunmart
+      POSTGRES_DB: sunmart
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_pass
+    secrets:
+      - postgres_pass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - sunmart-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sunmart"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  core-svc:
+    image: sunmart/core-svc:latest
+    build:
+      context: ./apps/core-go
+      dockerfile: Dockerfile
+    environment:
+      NATS_URL: "nats://nats:4222"
+      DB_HOST: "postgres"
+      DB_PORT: "5432"
+      DB_NAME: "sunmart"
+      DB_USER: "sunmart"
+      DB_PASSWORD_FILE: /run/secrets/postgres_pass
+    secrets:
+      - postgres_pass
+      - env_file
+    networks:
+      - sunmart-net
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  portal:
+    image: sunmart/portal:latest
+    build:
+      context: ./apps/frontend
+      dockerfile: Dockerfile.distroless
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_URL: "http://localhost:8080"
+    secrets:
+      - env_file
+    networks:
+      - sunmart-net
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      core-svc:
+        condition: service_healthy
+
+  netdata:
+    image: netdata/netdata
+    ports:
+      - "19999:19999"
+    networks:
+      - sunmart-net
+    restart: unless-stopped
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - apparmor:unconfined
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  portainer:
+    image: portainer/portainer-ce:latest
+    command: ["--admin-password-file", "/run/secrets/portainer_admin"]
+    secrets:
+      - portainer_admin
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - portainer_data:/data
+    networks:
+      - sunmart-net
+    restart: unless-stopped
+    ports:
+      - "9443:9443"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "https://localhost:9443/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  watchtower:
+    image: containrrr/watchtower
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      WATCHTOWER_CLEANUP: "true"
+      WATCHTOWER_INCLUDE_STOPPED: "true"
+      WATCHTOWER_REVIVE_STOPPED: "true"
+      WATCHTOWER_SCHEDULE: "0 0 4 * * *"
+      WATCHTOWER_NOTIFICATIONS: "shoutrrr"
+      DOCKER_API_VERSION: "1.44"
+    secrets:
+      - telegram_config
+    networks:
+      - sunmart-net
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  nats_data:
+  portainer_data:
+
+networks:
+  sunmart-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/16
+
+secrets:
+  postgres_pass:
+    file: ./secrets/postgres_pass
+  portainer_admin:
+    file: ./secrets/portainer_admin
+  env_file:
+    file: ./.env
+  telegram_config:
+    file: ./secrets/telegram_config
